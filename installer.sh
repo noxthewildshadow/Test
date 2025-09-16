@@ -1,131 +1,105 @@
 #!/usr/bin/env bash
-RESET="\e[0m"
-GREEN="\e[32m"
-RED="\e[31m"
-YELLOW="\e[33m"
-ORANGE="\e[38;5;208m"
-BLUE="\e[34m"
-BOLD="\e[1m"
 
-step_counter=0
-step() {
-  step_counter=$((step_counter+1))
-  printf "\n${BOLD}${BLUE}STEP %02d:${RESET} %s\n" "$step_counter" "$1"
-}
-msg_ok() { printf "  ${GREEN}[OK]${RESET} %s\n" "$1"; }
-msg_warn() { printf "  ${ORANGE}[WARN]${RESET} %s\n" "$1"; }
-msg_err() { printf "  ${RED}[ERROR]${RESET} %s\n" "$1"; }
+# Color configuration
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-run_cmd() {
-  bash -c "$1"
-  rc=$?
-  if [ $rc -eq 0 ]; then msg_ok "Command succeeded: $1"; return 0; else
-    if [ "$2" = "critical" ]; then msg_err "Critical failure (code $rc): $1"; exit 1; else msg_warn "Non-critical failure (code $rc): $1"; return $rc; fi
-  fi
+# Function to display critical errors
+critical_error() {
+    echo -e "${RED}[CRITICAL ERROR]${NC} $1"
+    exit 1
 }
 
-download_file() {
-  url="$1"; out="$2"; critical="$3"
-  printf "  Downloading: %s -> %s\n" "$url" "$out"
-  curl -fSL --retry 3 --retry-delay 2 "$url" -o "$out"
-  rc=$?
-  if [ $rc -eq 0 ]; then chmod +x "$out" 2>/dev/null || true; msg_ok "Downloaded: $out"; return 0; else
-    if [ "$critical" = "critical" ]; then msg_err "Failed to download (critical): $url"; exit 1; else msg_warn "Failed to download (non-critical): $url"; return $rc; fi
-  fi
+# Function to display warnings
+warning() {
+    echo -e "${ORANGE}[WARNING]${NC} $1"
 }
 
-printf "${BOLD}Starting installer and patcher for Ubuntu 22.04 environment${RESET}\n"
+# Function to display success messages
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
 
-WORKDIR="$(pwd)/blockheads_install_$(date +%s)"
-mkdir -p "$WORKDIR" || { msg_err "Cannot create workdir: $WORKDIR"; exit 1; }
-step "Preparing work directory: $WORKDIR"
-msg_ok "Work directory: $WORKDIR"
-cd "$WORKDIR" || { msg_err "Cannot cd to $WORKDIR"; exit 1; }
+# Function to display information
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
 
-step "Detecting OS and version"
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  if [ "${NAME:-}" = "Ubuntu" ] && [ "${VERSION_ID:-}" = "22.04" ]; then
-    msg_ok "Running on Ubuntu 22.04"
-  else
-    msg_warn "OS is ${NAME:-unknown} ${VERSION_ID:-unknown} — intended target is Ubuntu 22.04"
-  fi
-else
-  msg_warn "/etc/os-release not found — cannot verify distribution"
+# Function to download files from GitHub
+download_github() {
+    local file=$1
+    info "Downloading $file..."
+    curl -sSL -o "$file" "https://raw.githubusercontent.com/noxthewildshadow/Test/main/$file"
+    
+    if [ $? -ne 0 ]; then
+        warning "Failed to download $file"
+        return 1
+    else
+        success "$file downloaded successfully"
+        return 0
+    fi
+}
+
+# Step 1: Check for required dependencies
+info "Checking required dependencies..."
+command -v curl >/dev/null 2>&1 || critical_error "curl is required but not installed"
+command -v patchelf >/dev/null 2>&1 || critical_error "patchelf is required but not installed"
+
+# Step 2: Download and extract the binary
+info "Downloading main binary..."
+curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xvz
+
+if [ $? -ne 0 ]; then
+    critical_error "Failed to download the main binary"
 fi
 
-step "Ensuring required packages (curl, tar, patchelf) are installed"
-if command -v apt-get >/dev/null 2>&1; then
-  sudo apt-get update -y
-  sudo apt-get install -y curl tar patchelf >/dev/null 2>&1
-  if command -v patchelf >/dev/null 2>&1; then
-    msg_ok "Required packages are present"
-  else
-    msg_warn "patchelf not installed after apt attempt"
-  fi
-else
-  msg_warn "apt-get not found; please ensure curl, tar and patchelf are installed manually"
-fi
-
-step "Download and extract tarball (critical)"
-TARBALL_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
-bash -c "curl -fSL \"$TARBALL_URL\" | tar xvz"
-if [ $? -ne 0 ]; then msg_err "Failed to download or extract tarball from $TARBALL_URL"; exit 1; else msg_ok "Tarball downloaded and extracted"; fi
-
-BIN_NAME="blockheads_server171"
-if [ ! -f "$BIN_NAME" ]; then
-  FOUND_BIN="$(find . -maxdepth 2 -type f -executable -iname 'blockheads*' -print -quit)"
-  if [ -n "$FOUND_BIN" ]; then BIN="$FOUND_BIN"; msg_warn "Expected name not found; using: $BIN"; else msg_err "Binary $BIN_NAME not found and no executable discovered"; exit 1; fi
-else
-  BIN="./$BIN_NAME"
-  msg_ok "Binary to patch: $BIN"
-fi
-
-step "Checking patchelf (critical)"
-if command -v patchelf >/dev/null 2>&1; then msg_ok "patchelf found: $(command -v patchelf)"; else msg_err "patchelf not installed. Install it and re-run."; exit 1; fi
-
-step "Applying patchelf replacements (non-critical failures will continue)"
-REPLACEMENTS=(
-  "libgnustep-base.so.1.24|libgnustep-base.so.1.28"
-  "libobjc.so.4.6|libobjc.so.4"
-  "libgnutls.so.26|libgnutls.so.30"
-  "libgcrypt.so.11|libgcrypt.so.20"
-  "libffi.so.6|libffi.so.8"
-  "libicui18n.so.48|libicui18n.so.70"
-  "libicuuc.so.48|libicuuc.so.70"
-  "libicudata.so.48|libicudata.so.70"
-  "libdispatch.so|libdispatch.so.0"
+# Step 3: Apply patches to the binary
+info "Applying patches to executable..."
+declare -A patches=(
+    ["libgnustep-base.so.1.24"]="libgnustep-base.so.1.28"
+    ["libobjc.so.4.6"]="libobjc.so.4"
+    ["libgnutls.so.26"]="libgnutls.so.30"
+    ["libgcrypt.so.11"]="libgcrypt.so.20"
+    ["libffi.so.6"]="libffi.so.8"
+    ["libicui18n.so.48"]="libicui18n.so.70"
+    ["libicuuc.so.48"]="libicuuc.so.70"
+    ["libicudata.so.48"]="libicudata.so.70"
+    ["libdispatch.so"]="libdispatch.so.0"
 )
-for r in "${REPLACEMENTS[@]}"; do
-  orig="${r%%|*}"; new="${r##*|}"
-  printf "  Trying: replace %s -> %s\n" "$orig" "$new"
-  patchelf --replace-needed "$orig" "$new" "$BIN"
-  if [ $? -eq 0 ]; then msg_ok "Replaced: $orig -> $new"; else msg_warn "Failed replace: $orig -> $new"; fi
+
+for original in "${!patches[@]}"; do
+    patchelf --replace-needed "$original" "${patches[$original]}" blockheads_server171
+    if [ $? -ne 0 ]; then
+        warning "Failed to apply patch for $original"
+    fi
 done
 
-step "Downloading helper scripts from GitHub (non-critical)"
-RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/Test/refs/heads/main"
-GITHUB_FILES=( "server_manager.sh" "server_patcher.sh" "common_functions.sh" "server_commands" )
-for f in "${GITHUB_FILES[@]}"; do
-  url="${RAW_BASE}/${f}"; out="./${f}"
-  download_file "$url" "$out" || true
+success "Patches applied to executable"
+
+# Step 4: Download additional scripts
+github_files=("installer.sh" "server_manager.sh" "server_patcher.sh" "common_functions.sh" "server_commands.sh")
+
+for file in "${github_files[@]}"; do
+    download_github "$file"
 done
 
-step "Download and run installer.sh via curl | sudo bash"
-INSTALLER_URL="${RAW_BASE}/installer.sh"
-bash -c "curl -fSL \"$INSTALLER_URL\" | sudo bash"
-rc_installer=$?
-if [ $rc_installer -eq 0 ]; then msg_ok "installer.sh executed successfully"; else msg_warn "installer.sh execution failed (code $rc_installer)"; fi
+# Step 5: Set execute permissions
+info "Setting execute permissions..."
+chmod +x installer.sh server_manager.sh server_patcher.sh server_commands.sh
 
-step "Ensure downloaded scripts are executable"
-for f in "${GITHUB_FILES[@]}"; do
-  if [ -f "./${f}" ]; then chmod +x "./${f}" 2>/dev/null || true; msg_ok "Made executable: ./${f}"; else msg_warn "Not found: ./${f}"; fi
-done
+if [ $? -ne 0 ]; then
+    warning "Failed to set execute permissions on all files"
+fi
 
-step "Final summary"
-msg_ok "Workdir: $WORKDIR"
-msg_ok "Binary: $BIN"
-msg_warn "Warnings (orange) indicate issues to review but the script continued"
-msg_ok "If any errors (red) appeared, the script stopped at that point"
+# Step 6: Execute installer
+info "Executing installer..."
+curl -sSL https://raw.githubusercontent.com/noxthewildshadow/Test/main/installer.sh | sudo bash
 
-printf "\n${BOLD}END${RESET}\n"
+if [ $? -ne 0 ]; then
+    critical_error "Failed to execute installer"
+else
+    success "Installation completed successfully"
+fi
