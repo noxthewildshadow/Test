@@ -300,10 +300,9 @@ update_user_data() {
     local user_exists=$(echo "$data_content" | jq -r --arg user "$username" '.users | has($user)')
     
     if [ "$user_exists" = "true" ]; then
-        # Update existing user - preserve created timestamp
-        local current_created=$(echo "$data_content" | jq -r --arg user "$username" '.users[$user].created // 0')
-        updated_data=$(echo "$data_content" | jq --arg user "$username" --argjson updates "$updates" --argjson created "$current_created" \
-            '.users[$user] = (.users[$user] + $updates + {created: $created})')
+        # Update existing user
+        updated_data=$(echo "$data_content" | jq --arg user "$username" --argjson updates "$updates" \
+            '.users[$user] = (.users[$user] + $updates)')
     else
         # Create new user with default values
         local new_user=$(echo '{
@@ -317,7 +316,9 @@ update_user_data() {
             "ip_change_attempts": 0,
             "password_change_attempts": 0,
             "admin_offenses": 0,
-            "created": 0
+            "last_login": 0,
+            "last_welcome_time": 0,
+            "last_greeting_time": 0
         }' | jq --arg user "$username" --argjson updates "$updates" \
             '.username = $user | . + $updates')
         
@@ -382,43 +383,43 @@ process_server_command() {
     case "$command" in
         "/BAN"|"/BAN-NO-DEVICE")
             update_user_data "$data_file" "$target" '{"blacklisted": true}'
-            # Ejecutar comando de ban en el servidor
+            # Execute server commands
             send_server_command "$screen_session" "/ban $target"
             send_server_command "$screen_session" "/kick $target"
             ;;
         "/UNBAN")
             update_user_data "$data_file" "$target" '{"blacklisted": false}'
-            # Ejecutar comando de unban en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/unban $target"
             ;;
         "/WHITELIST")
             update_user_data "$data_file" "$target" '{"whitelisted": true}'
-            # Ejecutar comando de whitelist en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/whitelist $target"
             ;;
         "/UNWHITELIST")
             update_user_data "$data_file" "$target" '{"whitelisted": false}'
-            # Ejecutar comando de unwhitelist en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/unwhitelist $target"
             ;;
         "/MOD")
             update_user_data "$data_file" "$target" '{"rank": "mod"}'
-            # Ejecutar comando de mod en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/mod $target"
             ;;
         "/UNMOD")
             update_user_data "$data_file" "$target" '{"rank": "NONE"}'
-            # Ejecutar comando de unmod en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/unmod $target"
             ;;
         "/ADMIN")
             update_user_data "$data_file" "$target" '{"rank": "admin"}'
-            # Ejecutar comando de admin en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/admin $target"
             ;;
         "/UNADMIN")
             update_user_data "$data_file" "$target" '{"rank": "NONE"}'
-            # Ejecutar comando de unadmin en el servidor
+            # Execute server command
             send_server_command "$screen_session" "/unadmin $target"
             ;;
         "/CLEAR-BLACKLIST")
@@ -457,60 +458,84 @@ monitor_data_json_changes() {
     local data_file="$1"
     local screen_session="$2"
     local last_hash=$(sha256sum "$data_file" | cut -d' ' -f1)
+    local temp_file="${data_file}.monitor.tmp"
+    
+    # Save initial state
+    local data_content=$(read_json_file "$data_file")
+    echo "$data_content" > "$temp_file"
     
     while true; do
         sleep 5
         local current_hash=$(sha256sum "$data_file" | cut -d' ' -f1)
         
         if [ "$current_hash" != "$last_hash" ]; then
-            print_status "Detected changes in data.json, applying to server..."
+            print_status "Detected changes in data.json, checking for updates..."
             last_hash="$current_hash"
             
-            # Read the current data
-            local data_content=$(read_json_file "$data_file")
+            # Read old and new state
+            local old_data=$(cat "$temp_file" 2>/dev/null || echo "{}")
+            local new_data=$(read_json_file "$data_file")
+            
+            # Save new state for next comparison
+            echo "$new_data" > "$temp_file"
+            
+            # Get list of users in both states
+            local old_users=$(echo "$old_data" | jq -r '.users | keys[]' 2>/dev/null)
+            local new_users=$(echo "$new_data" | jq -r '.users | keys[]' 2>/dev/null)
+            
+            # Combine and get unique users
+            local all_users=$(echo "$old_users" "$new_users" | tr ' ' '\n' | sort | uniq)
             
             # Process each user
-            echo "$data_content" | jq -r '.users | keys[]' | while read -r username; do
-                local user_data=$(echo "$data_content" | jq -r --arg user "$username" '.users[$user]')
-                local blacklisted=$(echo "$user_data" | jq -r '.blacklisted // false')
-                local whitelisted=$(echo "$user_data" | jq -r '.whitelisted // false')
-                local rank=$(echo "$user_data" | jq -r '.rank // "NONE"')
-                local user_created=$(echo "$user_data" | jq -r '.created // 0')
-                local current_time=$(date +%s)
+            for username in $all_users; do
+                # Get old and new user data
+                local old_user_data=$(echo "$old_data" | jq -r --arg user "$username" '.users[$user] // {}')
+                local new_user_data=$(echo "$new_data" | jq -r --arg user "$username" '.users[$user] // {}')
                 
-                # Skip processing for newly created users (within last 60 seconds)
-                if [ "$user_created" -gt 0 ] && [ $((current_time - user_created)) -lt 60 ]; then
-                    print_warning "Skipping commands for newly created user: $username (created $((current_time - user_created)) seconds ago)"
+                # Skip if user didn't exist before (new user)
+                if [ -z "$old_user_data" ] || [ "$old_user_data" = "{}" ]; then
                     continue
                 fi
                 
-                # Apply blacklist changes only if needed
-                if [ "$blacklisted" = "true" ]; then
-                    send_server_command "$screen_session" "/ban $username"
-                    send_server_command "$screen_session" "/kick $username"
-                else
-                    # Only send unban if the user was previously banned
-                    # We can't easily track previous state, so we'll be conservative
-                    # and not send unban unless we're sure it's needed
-                    print_status "Skipping unban for $username (not blacklisted)"
+                # Compare blacklisted status
+                local old_blacklisted=$(echo "$old_user_data" | jq -r '.blacklisted // false')
+                local new_blacklisted=$(echo "$new_user_data" | jq -r '.blacklisted // false')
+                if [ "$old_blacklisted" != "$new_blacklisted" ]; then
+                    if [ "$new_blacklisted" = "true" ]; then
+                        send_server_command "$screen_session" "/ban $username"
+                        send_server_command "$screen_session" "/kick $username"
+                    else
+                        send_server_command "$screen_session" "/unban $username"
+                    fi
                 fi
                 
-                # Apply whitelist changes only if needed
-                if [ "$whitelisted" = "true" ]; then
-                    send_server_command "$screen_session" "/whitelist $username"
-                else
-                    # Only send unwhitelist if the user was previously whitelisted
-                    print_status "Skipping unwhitelist for $username (not whitelisted)"
+                # Compare whitelisted status
+                local old_whitelisted=$(echo "$old_user_data" | jq -r '.whitelisted // false')
+                local new_whitelisted=$(echo "$new_user_data" | jq -r '.whitelisted // false')
+                if [ "$old_whitelisted" != "$new_whitelisted" ]; then
+                    if [ "$new_whitelisted" = "true" ]; then
+                        send_server_command "$screen_session" "/whitelist $username"
+                    else
+                        send_server_command "$screen_session" "/unwhitelist $username"
+                    fi
                 fi
                 
-                # Apply rank changes only if needed
-                if [ "$rank" = "admin" ]; then
-                    send_server_command "$screen_session" "/admin $username"
-                elif [ "$rank" = "mod" ]; then
-                    send_server_command "$screen_session" "/mod $username"
-                else
-                    # Only send unadmin/unmod if the user was previously admin/mod
-                    print_status "Skipping rank removal for $username (rank: $rank)"
+                # Compare rank
+                local old_rank=$(echo "$old_user_data" | jq -r '.rank // "NONE"')
+                local new_rank=$(echo "$new_user_data" | jq -r '.rank // "NONE"')
+                if [ "$old_rank" != "$new_rank" ]; then
+                    if [ "$new_rank" = "admin" ]; then
+                        send_server_command "$screen_session" "/admin $username"
+                    elif [ "$new_rank" = "mod" ]; then
+                        send_server_command "$screen_session" "/mod $username"
+                    else
+                        # If rank was admin or mod and now is NONE, remove ranks
+                        if [ "$old_rank" = "admin" ]; then
+                            send_server_command "$screen_session" "/unadmin $username"
+                        elif [ "$old_rank" = "mod" ]; then
+                            send_server_command "$screen_session" "/unmod $username"
+                        fi
+                    fi
                 fi
             done
             
