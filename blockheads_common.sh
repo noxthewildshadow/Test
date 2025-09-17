@@ -300,9 +300,10 @@ update_user_data() {
     local user_exists=$(echo "$data_content" | jq -r --arg user "$username" '.users | has($user)')
     
     if [ "$user_exists" = "true" ]; then
-        # Update existing user
-        updated_data=$(echo "$data_content" | jq --arg user "$username" --argjson updates "$updates" \
-            '.users[$user] = (.users[$user] + $updates)')
+        # Update existing user - preserve created timestamp
+        local current_created=$(echo "$data_content" | jq -r --arg user "$username" '.users[$user].created // 0')
+        updated_data=$(echo "$data_content" | jq --arg user "$username" --argjson updates "$updates" --argjson created "$current_created" \
+            '.users[$user] = (.users[$user] + $updates + {created: $created})')
     else
         # Create new user with default values
         local new_user=$(echo '{
@@ -315,7 +316,8 @@ update_user_data() {
             "economy": 0,
             "ip_change_attempts": 0,
             "password_change_attempts": 0,
-            "admin_offenses": 0
+            "admin_offenses": 0,
+            "created": 0
         }' | jq --arg user "$username" --argjson updates "$updates" \
             '.username = $user | . + $updates')
         
@@ -473,30 +475,42 @@ monitor_data_json_changes() {
                 local blacklisted=$(echo "$user_data" | jq -r '.blacklisted // false')
                 local whitelisted=$(echo "$user_data" | jq -r '.whitelisted // false')
                 local rank=$(echo "$user_data" | jq -r '.rank // "NONE"')
+                local user_created=$(echo "$user_data" | jq -r '.created // 0')
+                local current_time=$(date +%s)
                 
-                # Apply blacklist changes
+                # Skip processing for newly created users (within last 60 seconds)
+                if [ "$user_created" -gt 0 ] && [ $((current_time - user_created)) -lt 60 ]; then
+                    print_warning "Skipping commands for newly created user: $username (created $((current_time - user_created)) seconds ago)"
+                    continue
+                fi
+                
+                # Apply blacklist changes only if needed
                 if [ "$blacklisted" = "true" ]; then
                     send_server_command "$screen_session" "/ban $username"
                     send_server_command "$screen_session" "/kick $username"
                 else
-                    send_server_command "$screen_session" "/unban $username"
+                    # Only send unban if the user was previously banned
+                    # We can't easily track previous state, so we'll be conservative
+                    # and not send unban unless we're sure it's needed
+                    print_status "Skipping unban for $username (not blacklisted)"
                 fi
                 
-                # Apply whitelist changes
+                # Apply whitelist changes only if needed
                 if [ "$whitelisted" = "true" ]; then
                     send_server_command "$screen_session" "/whitelist $username"
                 else
-                    send_server_command "$screen_session" "/unwhitelist $username"
+                    # Only send unwhitelist if the user was previously whitelisted
+                    print_status "Skipping unwhitelist for $username (not whitelisted)"
                 fi
                 
-                # Apply rank changes
+                # Apply rank changes only if needed
                 if [ "$rank" = "admin" ]; then
                     send_server_command "$screen_session" "/admin $username"
                 elif [ "$rank" = "mod" ]; then
                     send_server_command "$screen_session" "/mod $username"
                 else
-                    send_server_command "$screen_session" "/unadmin $username"
-                    send_server_command "$screen_session" "/unmod $username"
+                    # Only send unadmin/unmod if the user was previously admin/mod
+                    print_status "Skipping rank removal for $username (rank: $rank)"
                 fi
             done
             
