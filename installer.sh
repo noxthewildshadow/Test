@@ -50,9 +50,9 @@ SERVER_BINARY="blockheads_server171"
 # GitHub raw content URLs
 SCRIPTS=(
     "server_manager.sh"
-    "server_bot.sh"
-    "anticheat_secure.sh"
-    "blockheads_common.sh"
+    "server_commands.sh"
+    "server_patcher.sh"
+    "common_functions.sh"
 )
 
 # Package lists for different distributions
@@ -180,7 +180,7 @@ download_script() {
     
     while [ $attempts -lt $max_attempts ]; do
         if wget $WGET_OPTIONS -O "$script_name" \
-            "https://raw.githubusercontent.com/noxthewildshadow/The-Blockheads-Server-BETA/main/$script_name"; then
+            "https://raw.githubusercontent.com/noxthewildshadow/Test/main/$script_name"; then
             return 0
         fi
         
