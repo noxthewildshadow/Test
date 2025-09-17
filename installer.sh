@@ -50,9 +50,9 @@ SERVER_BINARY="blockheads_server171"
 # GitHub raw content URLs
 SCRIPTS=(
     "server_manager.sh"
-    "server_commands.sh"
-    "server_patcher.sh"
-    "common_functions.sh"
+    "server_bot.sh"
+    "anticheat_secure.sh"
+    "blockheads_common.sh"
 )
 
 # Package lists for different distributions
