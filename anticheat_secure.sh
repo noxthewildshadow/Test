@@ -659,9 +659,6 @@ monitor_log() {
     print_status "Log directory: $LOG_DIR"
     print_header "SECURITY SYSTEM ACTIVE"
     
-    # Start monitoring data.json for changes
-    monitor_data_json_changes "$DATA_FILE" "$SCREEN_SERVER" &
-    
     # Wait for log file to exist
     local wait_time=0
     while [ ! -f "$log_file" ] && [ $wait_time -lt 30 ]; do
